@@ -114,6 +114,16 @@ export function processPiEvent(event, result) {
       result.sawAgentEnd = true;
       return addAssistantMessages(result, event.messages);
 
+    case "compaction_start":
+      result.compactionStarted = (result.compactionStarted || 0) + 1;
+      return true;
+
+    case "compaction_end":
+      if (!event.aborted && !event.errorMessage) {
+        result.compactionCompleted = (result.compactionCompleted || 0) + 1;
+      }
+      return true;
+
     default:
       return false;
   }

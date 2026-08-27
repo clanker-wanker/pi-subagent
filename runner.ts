@@ -28,7 +28,14 @@ import {
 const isWindows = process.platform === "win32";
 const SIGKILL_TIMEOUT_MS = 5000;
 const AGENT_END_GRACE_MS = 250;
+const COMPACT_GRACE_MS = 120_000;
+const MAX_RESUME_ATTEMPTS = 3;
 const PI_OFFLINE_ENV = "PI_OFFLINE";
+
+// Continuation prompt for a run that hit the context limit and completed a
+// post-run compaction. The child reloads the compacted session and continues.
+const CONTINUATION_PROMPT =
+  "[sub-agent-task] Your previous run hit the context limit and was compacted. Continue and complete the original task. Do not restart finished work.";
 
 type OnUpdateCallback = (partial: AgentToolResult) => void;
 
@@ -136,6 +143,11 @@ export interface RunAgentOptions {
  * Spawn a single subagent process and collect its results.
  *
  * Returns a SingleResult even on failure (exitCode > 0, stderr populated).
+ *
+ * If the run ends at the context limit (stopReason "length") and the child's
+ * post-run compaction completed, the child is respawned on the same session
+ * file with a continuation prompt (up to MAX_RESUME_ATTEMPTS total attempts).
+ * The timeout budget and maxTurns span attempts.
  */
 export async function runAgent(opts: RunAgentOptions): Promise<SingleResult> {
   const {
@@ -196,159 +208,216 @@ export async function runAgent(opts: RunAgentOptions): Promise<SingleResult> {
   }
 
   try {
-    const piArgs = buildPiArgs(task, forkSessionTmpPath, taskCwd);
     let wasAborted = false;
     let timedOut = false;
-    let exceededMaxTurns = false;
 
-    const exitCode = await new Promise<number>((resolve) => {
-      const { command, prefixArgs } = resolvePiSpawn();
-      const proc = spawn(command, [...prefixArgs, ...piArgs], {
-        cwd: taskCwd ?? cwd,
-        shell: false,
-        stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          [PI_OFFLINE_ENV]: "1",
-        },
-      });
+    // The deadline is computed once so the timeout budget spans resume
+    // attempts; result.usage.turns accumulates across attempts, so the
+    // maxTurns budget spans them too.
+    const deadline = Date.now() + timeout;
+    let attemptTask = task;
+    let exitCode = -1;
 
-      proc.stdin.on("error", () => {
-        /* ignore broken pipe on fast exits */
-      });
-      proc.stdin.end();
-
-      let buffer = "";
-      let didClose = false;
-      let settled = false;
-      let abortHandler: (() => void) | undefined;
-      let semanticCompletionTimer: NodeJS.Timeout | undefined;
-      let timeoutTimer: NodeJS.Timeout | undefined;
-
-      const clearTimers = () => {
-        if (semanticCompletionTimer) {
-          clearTimeout(semanticCompletionTimer);
-          semanticCompletionTimer = undefined;
-        }
-        if (timeoutTimer) {
-          clearTimeout(timeoutTimer);
-          timeoutTimer = undefined;
-        }
-      };
-
-      const terminateChild = () => {
-        if (isWindows) {
-          if (proc.pid !== undefined) {
-            const killer = spawn("taskkill", ["/T", "/F", "/PID", String(proc.pid)], {
-              stdio: "ignore",
-            });
-            killer.unref();
-          }
-          return;
-        }
-
-        proc.kill("SIGTERM");
-        const sigkillTimer = setTimeout(() => {
-          if (!didClose) proc.kill("SIGKILL");
-        }, SIGKILL_TIMEOUT_MS);
-        sigkillTimer.unref();
-      };
-
-      const finish = (code: number) => {
-        if (settled) return;
-        settled = true;
-        clearTimers();
-        if (signal && abortHandler) {
-          signal.removeEventListener("abort", abortHandler);
-        }
-        resolve(code);
-      };
-
-      const flushLine = (line: string) => {
-        if (exceededMaxTurns) return;
-        if (processPiJsonLine(line, result)) emitUpdate();
-        maybeFinishFromAgentEnd();
-      };
-
-      const flushBufferedLines = (text: string) => {
-        for (const line of text.split(/\r?\n/)) {
-          if (line.trim()) flushLine(line);
-        }
-      };
-
-      const maybeFinishFromAgentEnd = () => {
-        if (!result.sawAgentEnd || didClose || settled) return;
-        clearTimers();
-        semanticCompletionTimer = setTimeout(() => {
-          if (didClose || settled || !result.sawAgentEnd) return;
-          if (buffer.trim()) {
-            flushBufferedLines(buffer);
-            buffer = "";
-          }
-          proc.stdout.removeListener("data", onStdoutData);
-          proc.stderr.removeListener("data", onStderrData);
-          finish(0);
-          terminateChild();
-        }, AGENT_END_GRACE_MS);
-        semanticCompletionTimer.unref();
-      };
-
-      const onStdoutData = (chunk: Buffer) => {
-        buffer += chunk.toString();
-        const lines = buffer.split(/\r?\n/);
-        buffer = lines.pop() || "";
-        for (const line of lines) flushLine(line);
-      };
-
-      const onStderrData = (chunk: Buffer) => {
-        result.stderr += chunk.toString();
-      };
-
-      proc.stdout.on("data", onStdoutData);
-      proc.stderr.on("data", onStderrData);
-
-      // Timeout handling
-      timeoutTimer = setTimeout(() => {
-        if (didClose || settled) return;
+    for (let attempt = 1; attempt <= MAX_RESUME_ATTEMPTS; attempt++) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
         timedOut = true;
         result.timeout = true;
         result.exitCode = 124;
         result.stopReason = "timeout";
         result.errorMessage = `Sub-agent timed out after ${timeout / 1000}s`;
         result.stderr = `Sub-agent timed out after ${timeout / 1000}s`;
-        terminateChild();
-        setTimeout(() => {
-          if (!settled) finish(124);
-        }, SIGKILL_TIMEOUT_MS + 500);
-      }, timeout);
-
-      proc.on("close", (code) => {
-        didClose = true;
-        clearTimers();
-        if (buffer.trim()) flushBufferedLines(buffer);
-        finish(code ?? 0);
-      });
-
-      proc.on("error", (err) => {
-        if (!result.stderr.trim()) result.stderr = err.message;
-        clearTimers();
-        finish(1);
-      });
-
-      // Abort handling
-      if (signal) {
-        abortHandler = () => {
-          if (didClose || settled) return;
-          wasAborted = true;
-          clearTimers();
-          terminateChild();
-        };
-        if (signal.aborted) abortHandler();
-        else signal.addEventListener("abort", abortHandler, { once: true });
+        exitCode = 124;
+        break;
       }
-    });
 
-    result.exitCode = exitCode;
+      const attemptTimeoutMs = remainingMs;
+      const piArgs = buildPiArgs(attemptTask, forkSessionTmpPath, taskCwd);
+      let exceededMaxTurns = false;
+
+      exitCode = await new Promise<number>((resolve) => {
+        const { command, prefixArgs } = resolvePiSpawn();
+        const proc = spawn(command, [...prefixArgs, ...piArgs], {
+          cwd: taskCwd ?? cwd,
+          shell: false,
+          stdio: ["pipe", "pipe", "pipe"],
+          env: {
+            ...process.env,
+            [PI_OFFLINE_ENV]: "1",
+          },
+        });
+
+        proc.stdin.on("error", () => {
+          /* ignore broken pipe on fast exits */
+        });
+        proc.stdin.end();
+
+        let buffer = "";
+        let didClose = false;
+        let settled = false;
+        let abortHandler: (() => void) | undefined;
+        let semanticCompletionTimer: NodeJS.Timeout | undefined;
+        let timeoutTimer: NodeJS.Timeout | undefined;
+
+        const clearTimers = () => {
+          if (semanticCompletionTimer) {
+            clearTimeout(semanticCompletionTimer);
+            semanticCompletionTimer = undefined;
+          }
+          if (timeoutTimer) {
+            clearTimeout(timeoutTimer);
+            timeoutTimer = undefined;
+          }
+        };
+
+        const terminateChild = () => {
+          if (isWindows) {
+            if (proc.pid !== undefined) {
+              const killer = spawn("taskkill", ["/T", "/F", "/PID", String(proc.pid)], {
+                stdio: "ignore",
+              });
+              killer.unref();
+            }
+            return;
+          }
+
+          proc.kill("SIGTERM");
+          const sigkillTimer = setTimeout(() => {
+            if (!didClose) proc.kill("SIGKILL");
+          }, SIGKILL_TIMEOUT_MS);
+          sigkillTimer.unref();
+        };
+
+        const finish = (code: number) => {
+          if (settled) return;
+          settled = true;
+          clearTimers();
+          if (signal && abortHandler) {
+            signal.removeEventListener("abort", abortHandler);
+          }
+          resolve(code);
+        };
+
+        const flushLine = (line: string) => {
+          if (exceededMaxTurns) return;
+          if (processPiJsonLine(line, result)) emitUpdate();
+          maybeFinishFromAgentEnd();
+        };
+
+        const flushBufferedLines = (text: string) => {
+          for (const line of text.split(/\r?\n/)) {
+            if (line.trim()) flushLine(line);
+          }
+        };
+
+        const maybeFinishFromAgentEnd = () => {
+          if (!result.sawAgentEnd || didClose || settled) return;
+          clearTimers();
+          // Context exhaustion: in print mode the child performs post-run
+          // compaction before exiting. Wait for a natural exit so the
+          // CompactionEntry is persisted and a resume attempt is possible.
+          const waitingForCompaction = result.stopReason === "length";
+          const graceMs = waitingForCompaction ? COMPACT_GRACE_MS : AGENT_END_GRACE_MS;
+          semanticCompletionTimer = setTimeout(() => {
+            if (didClose || settled || !result.sawAgentEnd) return;
+            if (buffer.trim()) {
+              flushBufferedLines(buffer);
+              buffer = "";
+            }
+            if (waitingForCompaction) {
+              // Compaction did not finish within the grace window; give up
+              // waiting. The close event settles the promise with the real
+              // exit code.
+              terminateChild();
+              return;
+            }
+            proc.stdout.removeListener("data", onStdoutData);
+            proc.stderr.removeListener("data", onStderrData);
+            finish(0);
+            terminateChild();
+          }, graceMs);
+          semanticCompletionTimer.unref();
+        };
+
+        const onStdoutData = (chunk: Buffer) => {
+          buffer += chunk.toString();
+          const lines = buffer.split(/\r?\n/);
+          buffer = lines.pop() || "";
+          for (const line of lines) flushLine(line);
+        };
+
+        const onStderrData = (chunk: Buffer) => {
+          result.stderr += chunk.toString();
+        };
+
+        proc.stdout.on("data", onStdoutData);
+        proc.stderr.on("data", onStderrData);
+
+        // Timeout handling
+        timeoutTimer = setTimeout(() => {
+          if (didClose || settled) return;
+          timedOut = true;
+          result.timeout = true;
+          result.exitCode = 124;
+          result.stopReason = "timeout";
+          result.errorMessage = `Sub-agent timed out after ${timeout / 1000}s`;
+          result.stderr = `Sub-agent timed out after ${timeout / 1000}s`;
+          terminateChild();
+          setTimeout(() => {
+            if (!settled) finish(124);
+          }, SIGKILL_TIMEOUT_MS + 500);
+        }, attemptTimeoutMs);
+
+        proc.on("close", (code) => {
+          didClose = true;
+          clearTimers();
+          if (buffer.trim()) flushBufferedLines(buffer);
+          finish(code ?? 0);
+        });
+
+        proc.on("error", (err) => {
+          if (!result.stderr.trim()) result.stderr = err.message;
+          clearTimers();
+          finish(1);
+        });
+
+        // Abort handling
+        if (signal) {
+          abortHandler = () => {
+            if (didClose || settled) return;
+            wasAborted = true;
+            clearTimers();
+            terminateChild();
+          };
+          if (signal.aborted) abortHandler();
+          else signal.addEventListener("abort", abortHandler, { once: true });
+        }
+      });
+
+      result.exitCode = exitCode;
+
+      // Resume only on progress: the run ended at the context limit and the
+      // child's post-run compaction completed (CompactionEntry persisted to
+      // the session file).
+      const canResume =
+        !wasAborted &&
+        !timedOut &&
+        result.sawAgentEnd &&
+        result.stopReason === "length" &&
+        (result.compactionCompleted ?? 0) > 0;
+      if (!canResume) break;
+
+      attemptTask = CONTINUATION_PROMPT;
+      // Reset per-attempt state. usage.turns (maxTurns budget) and the
+      // deadline above intentionally span attempts.
+      result.sawAgentEnd = false;
+      result.stopReason = undefined;
+      result.errorMessage = undefined;
+      result.compactionStarted = 0;
+      result.compactionCompleted = 0;
+      emitUpdate();
+    }
+
     return normalizeCompletedResult(result, wasAborted);
   } finally {
     cleanupTempDir(forkSessionTmpDir);

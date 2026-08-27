@@ -36,6 +36,8 @@ export interface SingleResult {
 	sawAgentEnd?: boolean;
 	timeout?: boolean;
 	maxTurns?: boolean;
+	compactionStarted?: number;
+	compactionCompleted?: number;
 }
 
 /** Metadata attached to every tool result for rendering. */
