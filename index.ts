@@ -16,7 +16,7 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { renderCall, renderResult } from "./render.js";
-import { getFinalAssistantText, getResultSummaryText } from "./runner-events.js";
+import { getResultSummaryText } from "./runner-events.js";
 import { runAgent } from "./runner.js";
 import {
 	type SingleResult,
@@ -159,7 +159,7 @@ export default function (pi: ExtensionAPI) {
 			"The sub-agent inherits your full session context (conversation history + system prompt).",
 			"",
 			"Optional parameters:",
-			"  timeout: Max execution time in seconds (default: 120)",
+			"  timeout: Max execution time in seconds (default: 600)",
 			"  maxTurns: Max LLM turns/calls (default: 50)",
 			"",
 			"Example: { name: \"researcher\", task: \"Research the latest about quantum computing\", timeout: 180 }",
@@ -186,7 +186,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// Execute sub-agent
-			const timeoutMs = (params.timeout ?? 120) * 1000;
+			const timeoutMs = (params.timeout ?? 600) * 1000;
 			const maxTurns = params.maxTurns ?? 50;
 
 			const result = await runAgent({
@@ -202,7 +202,6 @@ export default function (pi: ExtensionAPI) {
 				maxTurns,
 			});
 
-			console.error(`[DEBUG execute] isResultError check: exitCode=${result.exitCode} stopReason=${result.stopReason} sawAgentEnd=${result.sawAgentEnd} messages.length=${result.messages.length} stderr=${result.stderr.substring(0,100)} hasFinalText=${getFinalAssistantText(result.messages).substring(0,80)}`);
 			if (isResultError(result)) {
 				return {
 					content: [

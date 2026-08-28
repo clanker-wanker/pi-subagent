@@ -70,7 +70,7 @@ npm install
 subagent({
   name: "researcher",     // Freeform name (human-like, for your reference)
   task: "Research the latest about quantum computing",
-  timeout: 180,           // Optional: max seconds (default: 120)
+  timeout: 180,           // Optional: max seconds (default: 600)
   maxTurns: 80,           // Optional: max LLM turns (default: 50)
   cwd: "/path/to/dir"     // Optional: working directory
 })
@@ -173,7 +173,7 @@ subagent({
 - **Full Context Inheritance** — Sub-agents receive the complete session context via JSONL snapshot.
 - **Auto-Injection** — Sub-agent instructions are injected into the system prompt at startup (constant text, KV cache stable).
 - **Recursion Guard** — Sub-agents cannot spawn further sub-agents. Enforced at the runner level by blocking `subagent` tool calls.
-- **Timeout & Max Turns** — Configurable safeguards against runaway sub-agents (default: 120s timeout, 50 max turns).
+- **Timeout & Max Turns** — Configurable safeguards against runaway sub-agents (default: 600s timeout, 50 max turns).
 - **Streaming Updates** — Watch sub-agent progress in real-time as tool calls and outputs stream in.
 - **Rich TUI Rendering** — Collapsed/expanded views with usage stats and tool call previews.
 
