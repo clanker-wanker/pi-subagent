@@ -183,7 +183,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<SingleResult> {
     messages: [],
     stderr: "",
     usage: emptyUsage(),
-    maxTurns: maxTurns,
+    maxTurnsBudget: maxTurns,
   };
 
   const emitUpdate = () => {

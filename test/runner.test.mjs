@@ -141,19 +141,35 @@ test("normalizeCompletedResult handles timeout", () => {
 test("normalizeCompletedResult handles max turns exceeded", () => {
   const result = makeResult({
     exitCode: 1,
-    maxTurns: 50,
-    stopReason: "max_turns",
-    errorMessage: "Sub-agent exceeded maximum turns (50)",
-    stderr: "Sub-agent exceeded maximum turns (50)",
+    maxTurns: true,
+    maxTurnsBudget: 50,
   });
 
   normalizeCompletedResult(result, false);
 
   assert.equal(result.exitCode, 1);
   assert.equal(result.stopReason, "max_turns");
-  assert.equal(result.errorMessage, "Sub-agent exceeded maximum turns (50)");
+  assert.equal(result.stderr, "Sub-agent exceeded maximum turns.");
   assert.equal(isResultSuccess(result), false);
   assert.equal(isResultError(result), true);
+});
+
+test("normalizeCompletedResult keeps a successful run successful when budget is set but not hit", () => {
+  const result = makeResult({
+    exitCode: 0,
+    sawAgentEnd: true,
+    maxTurnsBudget: 150,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 25 },
+    messages: [{ role: "assistant", content: [{ type: "text", text: "Done" }] }],
+  });
+
+  normalizeCompletedResult(result, false);
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stopReason, undefined);
+  assert.equal(result.maxTurns, undefined);
+  assert.equal(isResultSuccess(result), true);
+  assert.equal(isResultError(result), false);
 });
 
 test("isResultSuccess returns false for timeout even with semantic completion", () => {
@@ -171,7 +187,8 @@ test("isResultSuccess returns false for timeout even with semantic completion", 
 test("isResultSuccess returns false for max_turns even with semantic completion", () => {
   const result = makeResult({
     exitCode: 1,
-    maxTurns: 50,
+    maxTurns: true,
+    maxTurnsBudget: 50,
     stopReason: "max_turns",
     sawAgentEnd: true,
     messages: [{ role: "assistant", content: [{ type: "text", text: "Done" }] }],

@@ -35,7 +35,10 @@ export interface SingleResult {
 	errorMessage?: string;
 	sawAgentEnd?: boolean;
 	timeout?: boolean;
+	/** True only when the run actually hit the max-turns limit. */
 	maxTurns?: boolean;
+	/** The configured turn budget (number of assistant turns allowed). */
+	maxTurnsBudget?: number;
 	compactionStarted?: number;
 	compactionCompleted?: number;
 }

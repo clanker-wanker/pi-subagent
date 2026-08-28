@@ -79,10 +79,11 @@ export function processPiEvent(event, result) {
   if (!event || typeof event !== "object") return false;
 
   // Check max turns limit before processing new events
-  if (result.maxTurns && result.usage.turns >= result.maxTurns) {
+  if (result.maxTurnsBudget && result.usage.turns >= result.maxTurnsBudget) {
+    result.maxTurns = true;
     result.stopReason = "max_turns";
-    result.errorMessage = `Sub-agent exceeded maximum turns (${result.maxTurns})`;
-    result.stderr = `Sub-agent exceeded maximum turns (${result.maxTurns})`;
+    result.errorMessage = `Sub-agent exceeded maximum turns (${result.maxTurnsBudget})`;
+    result.stderr = `Sub-agent exceeded maximum turns (${result.maxTurnsBudget})`;
     return false;
   }
 
