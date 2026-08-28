@@ -147,3 +147,34 @@ test("maxTurns enforcement stops processing when limit is reached", () => {
   assert.equal(result.stopReason, "max_turns");
   assert.equal(result.errorMessage, "Sub-agent exceeded maximum turns (3)");
 });
+
+test("marks final message truncated when model hit output token limit", () => {
+  const result = makeResult();
+  result.exitCode = 0;
+  result.sawAgentEnd = true;
+  result.stopReason = "length";
+  result.messages = [
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "Summary cut off mid-sentence" }],
+    },
+  ];
+  assert.equal(
+    getResultSummaryText(result),
+    "Summary cut off mid-sentence\n\n[final message truncated: model hit output token limit]",
+  );
+});
+
+test("does not mark final message that ended normally", () => {
+  const result = makeResult();
+  result.exitCode = 0;
+  result.sawAgentEnd = true;
+  result.stopReason = "stop";
+  result.messages = [
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "Complete summary" }],
+    },
+  ];
+  assert.equal(getResultSummaryText(result), "Complete summary");
+});

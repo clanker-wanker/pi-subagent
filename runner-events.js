@@ -164,7 +164,12 @@ export function getFinalAssistantText(messages) {
 
 export function getResultSummaryText(result) {
   const finalText = getFinalAssistantText(result?.messages);
-  if (finalText) return finalText;
+  if (finalText) {
+    if (result?.stopReason === "length") {
+      return `${finalText}\n\n[final message truncated: model hit output token limit]`;
+    }
+    return finalText;
+  }
 
   if (typeof result?.errorMessage === "string" && result.errorMessage.trim()) {
     return result.errorMessage.trim();
