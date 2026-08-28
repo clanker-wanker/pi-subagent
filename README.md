@@ -69,10 +69,7 @@ npm install
 ```typescript
 subagent({
   name: "researcher",     // Freeform name (human-like, for your reference)
-  task: "Research the latest about quantum computing",
-  timeout: 180,           // Optional: max seconds (default: 600)
-  maxTurns: 80,           // Optional: max LLM turns (default: 50)
-  cwd: "/path/to/dir"     // Optional: working directory
+  task: "Research the latest about quantum computing"
 })
 ```
 
@@ -85,11 +82,21 @@ You can fork this repo and add in model selection as a parameter.
 |-----------|----------|---------|-------------|
 | `name` | Yes | — | Freeform human-like name (e.g., "researcher", "analyst"). Used for display only. |
 | `task` | Yes | — | Task description. The sub-agent receives the full session context. |
-| `timeout` | No | 600 | Maximum execution time in seconds. |
-| `maxTurns` | No | 50 | Maximum number of LLM turns the sub-agent can make. |
-| `cwd` | No | Parent cwd | Working directory for the sub-agent process. | 
 
-TODO: The cwd will break the KV cache because pi itself injects the current working dir into the system prompt. Advise telling your LLM to leave that param unset.
+### Configuration
+
+Budgets and working directory are configured statically (not per call) via
+environment variables:
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `PI_SUBAGENT_TIMEOUT` | Max wall time per sub-agent, seconds | 600 |
+| `PI_SUBAGENT_MAX_TURNS` | Max assistant turns | 50 |
+| `PI_SUBAGENT_CWD` | Working directory for the child process (`~` expanded) | parent cwd |
+
+> Setting a non-parent `PI_SUBAGENT_CWD` defeats the KV-cache prefix match
+> (pi injects the working directory into the system prompt). Only do this
+> deliberately.
 
 ### How It Works
 
@@ -152,10 +159,7 @@ A sub-agent will have FULL context for all tool calls/results and message histor
 \`\`\`
 subagent({
   name: "researcher",     // Freeform name (human-like, for your reference)
-  task: "Research the latest about quantum computing",
-  timeout: 180,           // Optional: max seconds (default: 600)
-  maxTurns: 80,           // Optional: max LLM turns (default: 50)
-  cwd: "/path/to/dir"     // Optional: working directory
+  task: "Research the latest about quantum computing"
 })
 \`\`\`
 
@@ -163,7 +167,7 @@ subagent({
 ### Best Practices
 
 1. Give sub-agents clear, specific task descriptions
-2. Set appropriate timeouts for long-running tasks
+2. Long-running tasks: raise PI_SUBAGENT_TIMEOUT before delegating
 3. Let sub-agents write results to files — you can read them back
 4. Use sub-agents to consolidate knowledge into summaries before bringing it back into your context
 ```
@@ -173,7 +177,7 @@ subagent({
 - **Full Context Inheritance** — Sub-agents receive the complete session context via JSONL snapshot.
 - **Auto-Injection** — Sub-agent instructions are injected into the system prompt at startup (constant text, KV cache stable).
 - **Recursion Guard** — Sub-agents cannot spawn further sub-agents. Enforced at the runner level by blocking `subagent` tool calls.
-- **Timeout & Max Turns** — Configurable safeguards against runaway sub-agents (default: 600s timeout, 50 max turns).
+- **Timeout & Max Turns** — Configurable via PI_SUBAGENT_* env vars (defaults: 600 s, 50 turns).
 - **Streaming Updates** — Watch sub-agent progress in real-time as tool calls and outputs stream in.
 - **Rich TUI Rendering** — Collapsed/expanded views with usage stats and tool call previews.
 

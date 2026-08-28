@@ -6,6 +6,8 @@
  * sub-agents (enforced at the runner level).
  */
 
+import * as os from "node:os";
+import * as path from "node:path";
 import type { Message } from "@mariozechner/pi-ai";
 import { getFinalAssistantText } from "./runner-events.js";
 
@@ -174,4 +176,44 @@ export function getDisplayItems(messages: Message[]): DisplayItem[] {
 		}
 	}
 	return items;
+}
+
+// ---------------------------------------------------------------------------
+// Subagent config (environment variables)
+// ---------------------------------------------------------------------------
+
+/** Resolved subagent budgets and working directory. */
+export interface SubagentConfig {
+	timeoutMs: number;
+	maxTurns: number;
+	cwd: string | undefined; // undefined → parent cwd
+}
+
+const DEFAULTS = { timeoutSeconds: 600, maxTurns: 50 };
+
+/** Expand a leading `~` to the user's home directory. */
+function expandHome(p: string): string {
+	return p.startsWith("~") ? path.join(os.homedir(), p.slice(1)) : p;
+}
+
+/** Parse an env var as a positive finite number; undefined when invalid. */
+function pickEnvNumber(v: string | undefined): number | undefined {
+	const n = v === undefined ? NaN : Number(v);
+	return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+}
+
+/**
+ * Resolve subagent budgets from PI_SUBAGENT_* environment variables.
+ * Invalid or missing values silently fall through to the built-in defaults.
+ */
+export function resolveSubagentConfig(): SubagentConfig {
+	const timeoutSeconds =
+		pickEnvNumber(process.env.PI_SUBAGENT_TIMEOUT) ?? DEFAULTS.timeoutSeconds;
+	const maxTurns = pickEnvNumber(process.env.PI_SUBAGENT_MAX_TURNS) ?? DEFAULTS.maxTurns;
+	const cwdOverride =
+		typeof process.env.PI_SUBAGENT_CWD === "string" && process.env.PI_SUBAGENT_CWD
+			? expandHome(process.env.PI_SUBAGENT_CWD)
+			: undefined;
+
+	return { timeoutMs: timeoutSeconds * 1000, maxTurns, cwd: cwdOverride };
 }

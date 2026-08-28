@@ -23,6 +23,7 @@ import {
 	emptyUsage,
 	isResultError,
 	isResultSuccess,
+	resolveSubagentConfig,
 } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -67,10 +68,7 @@ A sub-agent will have FULL context for all tool calls/results and message histor
 \`\`\`
 subagent({
   name: "researcher",     // Freeform name (human-like, for your reference)
-  task: "Research the latest about quantum computing",
-  timeout: 180,           // Optional: max seconds (default: 600)
-  maxTurns: 80,           // Optional: max LLM turns (default: 50)
-  cwd: "/path/to/dir"     // Optional: working directory
+  task: "Research the latest about quantum computing"
 })
 \`\`\`
 
@@ -78,7 +76,7 @@ subagent({
 ### Best Practices
 
 1. Give sub-agents clear, specific task descriptions
-2. Set appropriate timeouts for long-running tasks
+2. Long-running tasks: raise PI_SUBAGENT_TIMEOUT before delegating
 3. Let sub-agents write results to files — you can read them back
 4. Use sub-agents to consolidate knowledge into summaries before bringing it back into your context
 `;
@@ -95,24 +93,6 @@ const SubagentParams = Type.Object({
 		description:
 			"Task description. The sub-agent receives the full session context.",
 	}),
-	timeout: Type.Optional(
-		Type.Number({
-			description: "Maximum execution time in seconds. Default: 600.",
-			default: 600,
-		}),
-	),
-	maxTurns: Type.Optional(
-		Type.Number({
-			description:
-				"Maximum number of assistant turns (LLM calls) the sub-agent can make. Default: 50.",
-			default: 50,
-		}),
-	),
-	cwd: Type.Optional(
-		Type.String({
-			description: "Working directory for the agent process. Will default to your CWD.",
-		}),
-	),
 });
 
 // ---------------------------------------------------------------------------
@@ -158,11 +138,9 @@ export default function (pi: ExtensionAPI) {
 			"",
 			"The sub-agent inherits your full session context (conversation history + system prompt).",
 			"",
-			"Optional parameters:",
-			"  timeout: Max execution time in seconds (default: 600)",
-			"  maxTurns: Max LLM turns/calls (default: 50)",
+			"Budgets (timeout, maxTurns) and working directory are set via the PI_SUBAGENT_TIMEOUT / PI_SUBAGENT_MAX_TURNS / PI_SUBAGENT_CWD environment variables.",
 			"",
-			"Example: { name: \"researcher\", task: \"Research the latest about quantum computing\", timeout: 180 }",
+			"Example: { name: \"researcher\", task: \"Research the latest about quantum computing\" }",
 		].join("\n"),
 		parameters: SubagentParams,
 
@@ -186,20 +164,19 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// Execute sub-agent
-			const timeoutMs = (params.timeout ?? 600) * 1000;
-			const maxTurns = params.maxTurns ?? 50;
+			const cfg = resolveSubagentConfig();
 
 			const result = await runAgent({
 				cwd: ctx.cwd,
 				agentName: params.name,
 				task: params.task,
-				taskCwd: params.cwd,
+				taskCwd: cfg.cwd,
 				forkSessionSnapshotJsonl,
 				signal,
 				onUpdate,
 				makeDetails: (results) => ({ results }),
-				timeout: timeoutMs,
-				maxTurns,
+				timeout: cfg.timeoutMs,
+				maxTurns: cfg.maxTurns,
 			});
 
 			if (isResultError(result)) {
