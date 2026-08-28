@@ -27,7 +27,7 @@ import {
 
 const isWindows = process.platform === "win32";
 const SIGKILL_TIMEOUT_MS = 5000;
-const AGENT_END_GRACE_MS = 250;
+const AGENT_END_GRACE_MS = 7000;
 const COMPACT_GRACE_MS = 120_000;
 const MAX_RESUME_ATTEMPTS = 3;
 const PI_OFFLINE_ENV = "PI_OFFLINE";
@@ -35,7 +35,13 @@ const PI_OFFLINE_ENV = "PI_OFFLINE";
 // Continuation prompt for a run that hit the context limit and completed a
 // post-run compaction. The child reloads the compacted session and continues.
 const CONTINUATION_PROMPT =
-  "[sub-agent-task] Your previous run hit the context limit and was compacted. Continue and complete the original task. Do not restart finished work.";
+  "[sub-agent-task] Your previous run hit the context limit and was compacted. Continue the original task and complete it now. Take the next concrete action immediately with a tool call; do not narrate intent or re-plan work already done.";
+
+// Nudge prompt for a resume attempt that ended with a text-only "intent"
+// message (no tool calls) and stopReason "stop". Forces the model to take a
+// concrete action instead of narrating intent.
+const NUDGE_PROMPT =
+  "[sub-agent-task] Your last message described intent but took no action. Take the next concrete action now with a tool call. Do not narrate; act.";
 
 type OnUpdateCallback = (partial: AgentToolResult) => void;
 
@@ -147,6 +153,8 @@ export interface RunAgentOptions {
  * If the run ends at the context limit (stopReason "length") and the child's
  * post-run compaction completed, the child is respawned on the same session
  * file with a continuation prompt (up to MAX_RESUME_ATTEMPTS total attempts).
+ * If a resume attempt ends with a text-only "intent" message (no tool calls)
+ * and stopReason "stop", the child is nudged once with an "act now" prompt.
  * The timeout budget and maxTurns span attempts.
  */
 export async function runAgent(opts: RunAgentOptions): Promise<SingleResult> {
@@ -217,6 +225,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<SingleResult> {
     const deadline = Date.now() + timeout;
     let attemptTask = task;
     let exitCode = -1;
+    let nudged = false;
 
     for (let attempt = 1; attempt <= MAX_RESUME_ATTEMPTS; attempt++) {
       const remainingMs = deadline - Date.now();
@@ -234,6 +243,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<SingleResult> {
       const attemptTimeoutMs = remainingMs;
       const piArgs = buildPiArgs(attemptTask, forkSessionTmpPath, taskCwd);
       let exceededMaxTurns = false;
+      const attemptStartMsgCount = result.messages.length;
 
       exitCode = await new Promise<number>((resolve) => {
         const { command, prefixArgs } = resolvePiSpawn();
@@ -396,6 +406,18 @@ export async function runAgent(opts: RunAgentOptions): Promise<SingleResult> {
 
       result.exitCode = exitCode;
 
+      // Did the model take any tool action during this attempt? A resume
+      // attempt with no tool calls that ends in a text-only "stop" is an
+      // intent-only continuation (the model narrated but did not act).
+      const madeToolCallInAttempt = result.messages
+        .slice(attemptStartMsgCount)
+        .some(
+          (m) =>
+            m.role === "assistant" &&
+            Array.isArray(m.content) &&
+            m.content.some((p) => p?.type === "toolCall"),
+        );
+
       // Resume only on progress: the run ended at the context limit and the
       // child's post-run compaction completed (CompactionEntry persisted to
       // the session file).
@@ -405,9 +427,26 @@ export async function runAgent(opts: RunAgentOptions): Promise<SingleResult> {
         result.sawAgentEnd &&
         result.stopReason === "length" &&
         (result.compactionCompleted ?? 0) > 0;
-      if (!canResume) break;
 
-      attemptTask = CONTINUATION_PROMPT;
+      // Intent-only continuation: after a resume, the model may reply with a
+      // text-only "intent" message (no tool calls) and stopReason "stop",
+      // which ends the agent loop without doing the work. Nudge once to force
+      // a concrete action. Capped by `nudged` and the attempt budget.
+      const canNudge =
+        !canResume &&
+        attempt > 1 &&
+        attempt < MAX_RESUME_ATTEMPTS &&
+        !wasAborted &&
+        !timedOut &&
+        !nudged &&
+        result.sawAgentEnd &&
+        result.stopReason === "stop" &&
+        !madeToolCallInAttempt;
+
+      if (!canResume && !canNudge) break;
+
+      if (canNudge) nudged = true;
+      attemptTask = canResume ? CONTINUATION_PROMPT : NUDGE_PROMPT;
       // Reset per-attempt state. usage.turns (maxTurns budget) and the
       // deadline above intentionally span attempts.
       result.sawAgentEnd = false;
