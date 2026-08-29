@@ -17,6 +17,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { renderCall, renderResult } from "./render.js";
 import { getResultSummaryText } from "./runner-events.js";
+import { acquireSlot, releaseSlot } from "./queue.js";
 import { runAgent } from "./runner.js";
 import {
 	type SingleResult,
@@ -166,40 +167,69 @@ export default function (pi: ExtensionAPI) {
 			// Execute sub-agent
 			const cfg = resolveSubagentConfig();
 
-			const result = await runAgent({
-				cwd: ctx.cwd,
-				agentName: params.name,
-				task: params.task,
-				taskCwd: cfg.cwd,
-				forkSessionSnapshotJsonl,
-				signal,
-				onUpdate,
-				makeDetails: (results) => ({ results }),
-				timeout: cfg.timeoutMs,
-				maxTurns: cfg.maxTurns,
-			});
-
-			if (isResultError(result)) {
+			const outcome = await acquireSlot(signal);
+			if (outcome === "aborted") {
 				return {
 					content: [
 						{
 							type: "text" as const,
-							text: `Sub-agent failed: ${getResultSummaryText(result)}`,
+							text: "Sub-agent aborted while waiting in queue.",
 						},
 					],
-					details: { results: [result] },
+					details: { results: [] },
 					isError: true,
 				};
 			}
-			return {
-				content: [
-					{
-						type: "text" as const,
-						text: getResultSummaryText(result),
-					},
-				],
-				details: { results: [result] },
-			};
+			if (outcome === "waited") {
+				onUpdate?.({
+					content: [
+						{
+							type: "text",
+							text: "(queued — waiting for a free sub-agent slot)",
+						},
+					],
+					details: { results: [] },
+				});
+			}
+
+			try {
+				const result = await runAgent({
+					cwd: ctx.cwd,
+					agentName: params.name,
+					task: params.task,
+					taskCwd: cfg.cwd,
+					forkSessionSnapshotJsonl,
+					signal,
+					onUpdate,
+					makeDetails: (results) => ({ results }),
+					timeout: cfg.timeoutMs,
+					maxTurns: cfg.maxTurns,
+				});
+
+				if (isResultError(result)) {
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `Sub-agent failed: ${getResultSummaryText(result)}`,
+							},
+						],
+						details: { results: [result] },
+						isError: true,
+					};
+				}
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: getResultSummaryText(result),
+						},
+					],
+					details: { results: [result] },
+				};
+			} finally {
+				releaseSlot();
+			}
 		},
 
 		renderCall: (args, theme) => renderCall(args, theme),

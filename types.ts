@@ -197,7 +197,7 @@ function expandHome(p: string): string {
 }
 
 /** Parse an env var as a positive finite number; undefined when invalid. */
-function pickEnvNumber(v: string | undefined): number | undefined {
+export function pickEnvNumber(v: string | undefined): number | undefined {
 	const n = v === undefined ? NaN : Number(v);
 	return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
 }

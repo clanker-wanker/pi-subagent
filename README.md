@@ -93,6 +93,7 @@ environment variables:
 | `PI_SUBAGENT_TIMEOUT` | Max wall time per sub-agent, seconds | 600 |
 | `PI_SUBAGENT_MAX_TURNS` | Max assistant turns | 50 |
 | `PI_SUBAGENT_CWD` | Working directory for the child process (`~` expanded) | parent cwd |
+| `PI_SUBAGENT_MAX_CONCURRENT` | Max concurrent sub-agent processes; excess calls wait in a FIFO queue | unlimited |
 
 > Setting a non-parent `PI_SUBAGENT_CWD` defeats the KV-cache prefix match
 > (pi injects the working directory into the system prompt). Only do this
